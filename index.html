@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>51Talk-like Demo — Classroom</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    body { padding: 1rem; background: #f7f9fc; }
+    .video-grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(240px,1fr)); gap: .5rem; }
+    video { width: 100%; height: auto; background: black; border-radius: 8px; }
+    .controls button { margin-right: .25rem; }
+    .sidebar { max-width: 320px; }
+    .muted { opacity: 0.6; }
+    .user-card { display:flex; gap:.5rem; align-items:center; padding:.5rem; border-radius:.5rem; background:#fff; box-shadow:0 1px 2px rgba(0,0,0,.04); }
+  </style>
+</head>
+<body>
+<div class="container-fluid">
+  <div class="row">
+    <div class="col-lg-9">
+      <div class="d-flex justify-content-between align-items-center mb-3">
+        <h3>Classroom Dashboard</h3>
+        <div>
+          <input id="roomIdInput" class="form-control d-inline-block" style="width:200px" placeholder="Room ID">
+          <button id="createBtn" class="btn btn-primary">Create / Join</button>
+          <button id="leaveBtn" class="btn btn-outline-danger">Leave</button>
+        </div>
+      </div>
+
+      <div class="card mb-3">
+        <div class="card-body">
+          <div class="d-flex gap-3 mb-3">
+            <div>
+              <label class="form-label">Your role</label>
+              <select id="roleSelect" class="form-select">
+                <option value="teacher">Teacher</option>
+                <option value="student">Student</option>
+              </select>
+            </div>
+            <div>
+              <label class="form-label">Your name</label>
+              <input id="nameInput" class="form-control" placeholder="e.g. Mr. Allan">
+            </div>
+          </div>
+
+          <div class="video-grid" id="videos"></div>
+
+          <div class="mt-3 controls">
+            <button id="toggleMic" class="btn btn-secondary">Mute Mic</button>
+            <button id="toggleCam" class="btn btn-secondary">Stop Camera</button>
+            <button id="shareScreen" class="btn btn-outline-secondary">Share Screen</button>
+            <button id="toggleRecord" class="btn btn-outline-secondary">Start Recording</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-body">
+          <h5>Chat</h5>
+          <div id="chatLog" style="height:200px;overflow:auto;background:#fff;padding:.5rem;border-radius:.5rem"></div>
+          <div class="input-group mt-2">
+            <input id="chatInput" class="form-control" placeholder="Write a message...">
+            <button id="sendChat" class="btn btn-primary">Send</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="col-lg-3 sidebar">
+      <div class="card mb-3">
+        <div class="card-body">
+          <h5>Participants</h5>
+          <div id="participants"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-body">
+          <h6>Session Info</h6>
+          <p><strong>Signaling server:</strong> <span id="sigInfo"></span></p>
+          <p><strong>ICE servers:</strong> STUN only (demo)</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="https://unpkg.com/simple-peer@9.11.1/simplepeer.min.js"></script>
+<script>
+const SIGNALING_SERVER = 'ws://localhost:8080'; // CHANGE THIS BEFORE LIVE USE
+const ICE_SERVERS = [ { urls: 'stun:stun.l.google.com:19302' } ];
+
+const createBtn = document.getElementById('createBtn');
+const leaveBtn = document.getElementById('leaveBtn');
+const roomIdInput = document.getElementById('roomIdInput');
+const videos = document.getElementById('videos');
+const participantsDiv = document.getElementById('participants');
+const nameInput = document.getElementById('nameInput');
+const roleSelect = document.getElementById('roleSelect');
+const sigInfo = document.getElementById('sigInfo');
+const chatLog = document.getElementById('chatLog');
+const chatInput = document.getElementById('chatInput');
+const sendChat = document.getElementById('sendChat');
+const toggleMic = document.getElementById('toggleMic');
+const toggleCam = document.getElementById('toggleCam');
+const shareScreenBtn = document.getElementById('shareScreen');
+const toggleRecordBtn = document.getElementById('toggleRecord');
+
+sigInfo.textContent = SIGNALING_SERVER;
+
+let localStream = null;
+let peers = [];
+let ws = null;
+let roomId = null;
+let recorder = null;
+let recordedChunks = [];
+
+async function getLocalStream() {
+  try {
+    const s = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+    localStream = s;
+    addVideo('local', s, true);
+    return s;
+  } catch (e) {
+    alert('Could not get camera/mic: ' + e.message);
+    throw e;
+  }
+}
+
+function addVideo(id, stream, muted=false) {
+  let container = document.getElementById('vid-'+id);
+  if (container) container.remove();
+  const wrap = document.createElement('div');
+  wrap.id = 'vid-'+id;
+  wrap.innerHTML = `<div class="user-card"><div style="flex:1"><strong>${id === 'local' ? 'You' : id}</strong></div></div>`;
+  const vid = document.createElement('video');
+  vid.autoplay = true; vid.playsInline = true; vid.muted = muted;
+  vid.srcObject = stream;
+  wrap.appendChild(vid);
+  videos.appendChild(wrap);
+}
+
+function addParticipant(name, id) {
+  const card = document.createElement('div');
+  card.className = 'mb-2 user-card';
+  card.id = 'p-'+id;
+  card.innerHTML = `<div style="flex:1"><strong>${name||id}</strong><br><small>${id}</small></div>`;
+  participantsDiv.appendChild(card);
+}
+
+function removeParticipant(id) {
+  const el = document.getElementById('p-'+id);
+  if (el) el.remove();
+  const vid = document.getElementById('vid-'+id);
+  if (vid) vid.remove();
+}
+
+function logChat(who, text) {
+  const p = document.createElement('div');
+  p.innerHTML = `<strong>${who}:</strong> ${text}`;
+  chatLog.appendChild(p);
+  chatLog.scrollTop = chatLog.scrollHeight;
+}
+
+function connectSignaling(rid) {
+  ws = new WebSocket(SIGNALING_SERVER);
+  ws.onopen = () => { ws.send(JSON.stringify({ type: 'join', room: rid })); };
+  ws.onmessage = async (evt) => {
+    let msg = JSON.parse(evt.data);
+    if (msg.type === 'peer-joined') { await createPeer(true); }
+    if (msg.type === 'signal') {
+      const payload = msg.payload;
+      peers.forEach(({peer}) => peer.signal(payload));
+    }
+    if (msg.type === 'peer-left') { console.log('peer left'); }
+  };
+}
+
+async function createPeer(initiator=false) {
+  if (!localStream) await getLocalStream();
+  const peer = new SimplePeer({ initiator, trickle: true, stream: localStream, config: { iceServers: ICE_SERVERS } });
+  const id = Math.random().toString(36).slice(2,9);
+  peers.push({ peer, id });
+
+  peer.on('signal', data => {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'signal', room: roomId, payload: data }));
+    }
+  });
+  peer.on('stream', stream => {
+    addVideo(id, stream, false);
+    addParticipant('Participant', id);
+  });
+  peer.on('close', () => { removeParticipant(id); });
+  peer.on('error', err => console.error('peer error', err));
+}
+
+createBtn.addEventListener('click', async () => {
+  if (!roomIdInput.value) { alert('Enter a room ID'); return; }
+  roomId = roomIdInput.value.trim();
+  await getLocalStream();
+  connectSignaling(roomId);
+  logChat('System', `Joined room ${roomId}`);
+});
+
+leaveBtn.addEventListener('click', () => {
+  if (ws) ws.close();
+  peers.forEach(({peer}) => peer.destroy());
+  peers = [];
+  localStream && localStream.getTracks().forEach(t => t.stop());
+  localStream = null;
+  videos.innerHTML = '';
+  participantsDiv.innerHTML = '';
+  logChat('System', 'Left the room');
+});
+
+sendChat.addEventListener('click', () => {
+  const text = chatInput.value.trim();
+  if (!text) return;
+  logChat('You', text);
+  chatInput.value = '';
+});
+
+let micOn = true, camOn = true;
+toggleMic.addEventListener('click', () => {
+  if (!localStream) return;
+  micOn = !micOn;
+  localStream.getAudioTracks().forEach(t => t.enabled = micOn);
+  toggleMic.textContent = micOn ? 'Mute Mic' : 'Unmute Mic';
+});
+
+toggleCam.addEventListener('click', () => {
+  if (!localStream) return;
+  camOn = !camOn;
+  localStream.getVideoTracks().forEach(t => t.enabled = camOn);
+  toggleCam.textContent = camOn ? 'Stop Camera' : 'Start Camera';
+});
+
+shareScreenBtn.addEventListener('click', async () => {
+  try {
+    const screen = await navigator.mediaDevices.getDisplayMedia({ video: true });
+    addVideo('local-screen', screen, true);
+    peers.forEach(({peer}) => { try { peer.addStream(screen); } catch (e) {} });
+    screen.getTracks()[0].onended = () => {
+      const el = document.getElementById('vid-local-screen'); if (el) el.remove();
+      if (localStream) addVideo('local', localStream, true);
+    };
+  } catch (e) {}
+});
+
+toggleRecordBtn.addEventListener('click', () => {
+  if (!localStream) return alert('Start camera first');
+  if (!recorder) {
+    recordedChunks = [];
+    recorder = new MediaRecorder(localStream);
+    recorder.ondataavailable = e => { if (e.data.size) recordedChunks.push(e.data); };
+    recorder.onstop = () => {
+      const blob = new Blob(recordedChunks, { type: 'video/webm' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a'); a.href = url; a.download = 'recording.webm'; a.click();
+      recorder = null;
+    };
+    recorder.start();
+    toggleRecordBtn.textContent = 'Stop Recording';
+  } else {
+    recorder.stop();
+    toggleRecordBtn.textContent = 'Start Recording';
+  }
+});
+</script>
+</body>
+</html>
